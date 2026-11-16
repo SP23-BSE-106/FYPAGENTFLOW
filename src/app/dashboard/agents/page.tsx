@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import {
   Plus, Cpu, ArrowUpRight, Trash2, Play, Calendar,
-  Layers, ChevronRight, Loader2, AlertTriangle, Tag
+  Layers, ChevronRight, Loader2, AlertTriangle, Tag, Shield, Zap
 } from "lucide-react";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/Card";
@@ -189,8 +189,14 @@ export default function AgentsPage() {
                           <Layers className="h-3 w-3" />
                           {nodeCount} node{nodeCount !== 1 ? "s" : ""}
                         </span>
-                        {agent.llmProvider && (
+                        {agent.role && (
                           <span className="flex items-center gap-1">
+                            <Shield className="h-3 w-3 text-accent" />
+                            {agent.role}
+                          </span>
+                        )}
+                        {agent.llmProvider && (
+                          <span className="flex items-center gap-1 ml-auto">
                             <Cpu className="h-3 w-3" />
                             {providerLabel}
                           </span>
@@ -201,9 +207,24 @@ export default function AgentsPage() {
                         </span>
                       </div>
 
+                      {/* Capabilities */}
+                      {agent.capabilities && agent.capabilities.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-1">
+                          {agent.capabilities.map((cap: { name: string; description?: string }) => (
+                            <span
+                              key={cap.name}
+                              className="inline-flex items-center gap-1 text-[9px] border border-accent/30 bg-accent/10 rounded px-1.5 py-0.5 text-accent"
+                            >
+                              <Zap className="h-2 w-2" />
+                              {cap.name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
                       {/* Tags */}
                       {agent.tags && agent.tags.length > 0 && (
-                        <div className="flex flex-wrap gap-1">
+                        <div className="flex flex-wrap gap-1 mt-2">
                           {agent.tags.map((tag) => (
                             <span
                               key={tag}

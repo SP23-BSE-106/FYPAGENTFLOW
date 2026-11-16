@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { LayoutDashboard, GitBranch, Terminal, CloudLightning, BarChart3, Sliders, ChevronLeft, ChevronRight, BookOpen, Boxes, LogOut, CreditCard, ListChecks, Plus, User, Database } from "lucide-react";
+import { LayoutDashboard, GitBranch, Terminal, CloudLightning, BarChart3, Sliders, ChevronLeft, ChevronRight, BookOpen, Boxes, LogOut, CreditCard, ListChecks, Plus, User, Database, Shield, Zap } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -19,7 +19,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ className }) => {
     const fetchUser = async () => {
       try {
         const res = await fetch('/api/auth/me')
-        const data = (await res.json().catch(() => ({}))) as { user?: any }
+        const data = (await res.json().catch(() => ({}))) as { user?: { fullName?: string; email?: string } }
         setUser(data.user ?? null)
       } catch {
         setUser(null)
@@ -50,6 +50,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ className }) => {
     { name: "Deployments", href: "/dashboard/deployment", icon: CloudLightning },
     { name: "Analytics", href: "/dashboard/analytics", icon: BarChart3 },
     { name: "Templates", href: "/dashboard/templates", icon: Boxes },
+    { name: "Multi-Agent Orchestration", href: "/dashboard/orchestrate", icon: Zap },
+    { name: "Human Approvals", href: "/dashboard/approvals", icon: Shield },
     { name: "Documentation", href: "/docs", icon: BookOpen },
     { name: "Profile", href: "/dashboard/profile", icon: User },
     { name: "Settings", href: "/dashboard/settings", icon: Sliders },
