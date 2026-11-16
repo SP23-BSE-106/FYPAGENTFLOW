@@ -70,6 +70,24 @@
   --font-mono: var(--font-geist-mono), ui-monospace, monospace;
 }
 
+/*
+ * Keep the app's semantic text utilities stable in production builds. These
+ * aliases intentionally mirror the @theme colors and provide a deterministic
+ * fallback when a deployed Tailwind build handles CSS-variable color aliases
+ * differently from the local dev compiler.
+ */
+.text-foreground {
+  color: var(--foreground) !important;
+}
+
+.text-muted {
+  color: var(--muted) !important;
+}
+
+.text-accent {
+  color: var(--accent) !important;
+}
+
 /* Custom Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
