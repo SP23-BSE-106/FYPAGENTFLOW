@@ -2,7 +2,10 @@ import type { NextRequest } from 'next/server'
 
 import { getDb } from '@/lib/mongo/mongo'
 import { getSessionTokenFromCookies, verifyJwt } from '@/lib/auth/jwt'
+import { authorizeExecution, checkOwnership } from '@/lib/permissions'
+import { auditWorkflowExecute } from '@/lib/audit'
 import { orchestrate } from '@/lib/orchestration/orchestrator'
+import { orchestrationRequestSchema } from '@/lib/validation/orchestrationSchemas'
 
 export const maxDuration = 60
 
@@ -44,38 +47,70 @@ export async function POST(request: NextRequest) {
     })
   }
 
-  const { agentId, input, mode = 'sequential' } = body
-  if (!agentId || typeof agentId !== 'string') {
-    return new Response(JSON.stringify({ error: 'agentId is required' }), {
+  const parsed = orchestrationRequestSchema.safeParse(body)
+  if (!parsed.success) {
+    return new Response(JSON.stringify({
+      error: 'Invalid orchestration request',
+      issues: parsed.error.issues,
+    }), {
       status: 400,
       headers: { 'Content-Type': 'application/json' },
     })
   }
-  if (!input || typeof input !== 'string' || !input.trim()) {
-    return new Response(JSON.stringify({ error: 'input is required' }), {
-      status: 400,
+  const { agentId, input, mode } = parsed.data
+
+  const db = await getDb()
+
+  // ── Permission check ───────────────────────────────────────────────
+  const permission = await authorizeExecution(userId, 'canExecute')
+  if (!permission.allowed) {
+    return new Response(JSON.stringify({ error: permission.reason }), {
+      status: permission.status ?? 403,
       headers: { 'Content-Type': 'application/json' },
     })
   }
 
-  const db = await getDb()
-  const workspaceSettings = await db.collection('workspace_settings').findOne({ userId })
-  const permissions = workspaceSettings?.permissions || {}
-  if (permissions.canExecute === false) {
-    return new Response(
-      JSON.stringify({ error: 'Execution permission is disabled for this workspace.' }),
-      { status: 403, headers: { 'Content-Type': 'application/json' } },
-    )
+  // ── Ownership: agent must belong to the caller ─────────────────────
+  const owned = await checkOwnership(db, 'agents', agentId, userId)
+  if (!owned.allowed) {
+    return new Response(JSON.stringify({ error: owned.reason }), {
+      status: owned.status ?? 404,
+      headers: { 'Content-Type': 'application/json' },
+    })
   }
 
   try {
+    const startedAt = Date.now()
     const result = await orchestrate({ agentId, input, userId, mode })
+    const durationMs = Date.now() - startedAt
+
+    // ── Audit log ────────────────────────────────────────────────────
+    await auditWorkflowExecute({
+      userId,
+      workflowId: agentId,
+      runId: result.runId,
+      mode,
+      status: result.status,
+      durationMs,
+      agentId,
+    })
+
     return new Response(JSON.stringify(result), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Orchestration failed'
+
+    // ── Audit log for failure ────────────────────────────────────────
+    await auditWorkflowExecute({
+      userId,
+      workflowId: agentId,
+      mode,
+      status: 'failed',
+      agentId,
+    })
+
     return new Response(JSON.stringify({ error: message }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },

@@ -7,6 +7,7 @@ import * as root from '../handler'
 import * as runs from '../runs/handler'
 import * as byId from '../[id]/handler'
 import * as capabilities from '../capabilities/handler'
+import * as versions from '../versions/handler'
 
 // Workflow generation calls a model end to end. Without an explicit budget
 // Vercel applies its default, which is shorter than the request below — the
@@ -23,6 +24,7 @@ type Handler = (request: NextRequest, ctx?: unknown) => Promise<Response> | Resp
  *   /api/agents            -> root        (GET, POST)
  *   /api/agents/generate   -> generate    (POST)
  *   /api/agents/runs       -> runs        (GET, POST)
+ *   /api/agents/{id}/versions -> versions (GET)
  *   /api/agents/{id}       -> byId        (GET, DELETE, PATCH)
  *
  * `runs` is matched before `{id}` so it can never be mistaken for one — agent
@@ -46,6 +48,9 @@ async function run(
     mod = generate
   } else if (path.length === 1 && path[0] === 'runs') {
     mod = runs
+  } else if (path.length === 2 && path[1] === 'versions') {
+    mod = versions
+    handlerCtx = { params: Promise.resolve({ id: path[0] }) }
   } else if (path.length === 1) {
     mod = byId
     handlerCtx = { params: Promise.resolve({ id: path[0] }) }

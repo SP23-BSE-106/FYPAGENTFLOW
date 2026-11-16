@@ -17,6 +17,9 @@ import {
   listTakenNames,
   repairLegacyDuplicateNames,
 } from '@/lib/agentNameStore'
+import { checkPermission } from '@/lib/permissions'
+import { auditAgentLifecycle } from '@/lib/audit'
+import { saveAgentVersion } from '@/lib/agentVersionStore'
 
 export async function GET() {
   const token = await getSessionTokenFromCookies()
@@ -53,6 +56,10 @@ export async function POST(request: NextRequest) {
   }
 
   const userId = payload.sub
+  const permission = await checkPermission(userId, 'canCreateAgents')
+  if (!permission.allowed) {
+    return NextResponse.json({ error: permission.reason }, { status: permission.status ?? 403 })
+  }
 
   const body = await request.json().catch(() => null)
   if (!body) {
@@ -140,6 +147,7 @@ export async function POST(request: NextRequest) {
       userApiKey: encryptedKey ?? null,
       status,
       tags: Array.isArray(tags) ? tags : [],
+      workflowVersion: 1,
       createdAt: now,
       updatedAt: now,
     })
@@ -157,6 +165,21 @@ export async function POST(request: NextRequest) {
     { _id: result.insertedId },
     { projection: { userApiKey: 0 } }, // don't return the encrypted key
   )
+
+  await auditAgentLifecycle({
+    userId,
+    action: 'agent.create',
+    agentId: String(result.insertedId),
+  })
+  await saveAgentVersion(db, {
+    userId,
+    agentId: String(result.insertedId),
+    version: 1,
+    prompt: prompt?.trim() ?? '',
+    workflow: workflow ?? undefined,
+    llmProvider: llmProvider ?? undefined,
+    notes: 'Initial workflow version',
+  })
 
   return NextResponse.json(inserted, { status: 201 })
 }

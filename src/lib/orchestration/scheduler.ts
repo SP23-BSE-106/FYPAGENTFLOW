@@ -17,6 +17,7 @@ export type SchedulerConfig = {
   maxConcurrentTasks: number
   maxRunDurationMs: number
   maxMessagesPerRun: number
+  getMessageCount?: () => Promise<number>
 }
 
 export type SchedulableTask = {
@@ -72,6 +73,12 @@ export async function scheduleParallel(
   while (remaining.size > 0 || active.size > 0) {
     // ── Run-level timeout ────────────────────────────────────────────
     if (Date.now() - startTime > config.maxRunDurationMs) {
+      for (const id of remaining) cancelled.add(id)
+      remaining.clear()
+      break
+    }
+
+    if (config.getMessageCount && (await config.getMessageCount()) >= config.maxMessagesPerRun) {
       for (const id of remaining) cancelled.add(id)
       remaining.clear()
       break

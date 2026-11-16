@@ -10,6 +10,9 @@ import {
   normalizeAgentName,
 } from '@/lib/agentName'
 import { listTakenNames, ensureAgentNameIndex, repairLegacyDuplicateNames } from '@/lib/agentNameStore'
+import { checkPermission } from '@/lib/permissions'
+import { auditAgentLifecycle } from '@/lib/audit'
+import { saveAgentVersion } from '@/lib/agentVersionStore'
 
 async function getAuthenticatedUserId() {
   const token = await getSessionTokenFromCookies()
@@ -59,9 +62,9 @@ export async function DELETE(
   }
 
   const db = await getDb()
-  const settings = await db.collection('workspace_settings').findOne({ userId })
-  if (settings?.permissions?.canEditWorkflows === false) {
-    return NextResponse.json({ error: 'Workflow editing permission is disabled for this workspace.' }, { status: 403 })
+  const permission = await checkPermission(userId, 'canEditWorkflows')
+  if (!permission.allowed) {
+    return NextResponse.json({ error: permission.reason }, { status: permission.status ?? 403 })
   }
 
   const result = await db
@@ -72,6 +75,7 @@ export async function DELETE(
     return NextResponse.json({ error: 'Not found or not authorised to delete' }, { status: 404 })
   }
 
+  await auditAgentLifecycle({ userId, action: 'agent.delete', agentId: id })
   return NextResponse.json({ success: true })
 }
 
@@ -98,9 +102,9 @@ export async function PATCH(
   }
 
   const db = await getDb()
-  const settings = await db.collection('workspace_settings').findOne({ userId })
-  if (settings?.permissions?.canEditWorkflows === false) {
-    return NextResponse.json({ error: 'Workflow editing permission is disabled for this workspace.' }, { status: 403 })
+  const permission = await checkPermission(userId, 'canEditWorkflows')
+  if (!permission.allowed) {
+    return NextResponse.json({ error: permission.reason }, { status: permission.status ?? 403 })
   }
 
   // A rename goes through the same rules as a create — otherwise renaming one
@@ -142,12 +146,23 @@ export async function PATCH(
 
   const result = await db
     .collection('agents')
-    .findOneAndUpdate(
-      { _id: new ObjectId(id), userId },
-      { $set: update },
-      { returnDocument: 'after', projection: { userApiKey: 0 } },
-    )
+      .findOneAndUpdate(
+        { _id: new ObjectId(id), userId },
+        { $set: update, $inc: { workflowVersion: 1 } },
+        { returnDocument: 'after', projection: { userApiKey: 0 } },
+      )
 
-  if (!result) return NextResponse.json({ error: 'Not found' }, { status: 404 })
-  return NextResponse.json(result)
+    if (!result) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+    const version = result.workflowVersion ?? 1
+    await saveAgentVersion(db, {
+      userId,
+      agentId: id,
+      version,
+      prompt: typeof result.prompt === 'string' ? result.prompt : undefined,
+      workflow: result.workflow,
+      llmProvider: typeof result.llmProvider === 'string' ? result.llmProvider : undefined,
+      notes: 'Workflow updated',
+    })
+    await auditAgentLifecycle({ userId, action: 'agent.update', agentId: id })
+    return NextResponse.json({ ...result, workflowVersion: version })
 }

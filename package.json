@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:workflow": "tsc -p tests/kimi-engine/tsconfig.json && node tests/kimi-engine/test.js"
+    "test:workflow": "tsc -p tests/kimi-engine/tsconfig.json && node tests/kimi-engine/test.js",
+    "test:hardening": "tsc -p tests/production-hardening/tsconfig.json && node tests/production-hardening/out/test.js",
+    "test:e2e": "node tests/e2e/orchestration.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",

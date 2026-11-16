@@ -20,6 +20,7 @@ import { createTask } from './taskManager'
 import { scheduleParallel, type SchedulerConfig } from './scheduler'
 import type { NodeExecutionResult } from './types'
 import type { Agent } from '@/lib/mongo/agent'
+import { supervisorPlanSchema } from '@/lib/validation/orchestrationSchemas'
 
 /** Max number of tasks a supervisor plan may contain. */
 const MAX_SUPERVISOR_TASKS = 10
@@ -187,34 +188,13 @@ function parseSupervisorPlan(text: string): SupervisorPlan {
     }
   }
 
-  const obj = raw as Record<string, unknown>
-
-  if (
-    typeof obj.objective !== 'string' ||
-    !Array.isArray(obj.tasks) ||
-    !Array.isArray(obj.completionCriteria)
-  ) {
-    throw new Error('Supervisor plan is missing required fields.')
+  const parsed = supervisorPlanSchema.safeParse(raw)
+  if (!parsed.success) {
+    throw new Error(`Supervisor plan validation failed: ${parsed.error.issues
+      .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+      .join('; ')}`)
   }
-
-  const tasks = obj.tasks.map((t: unknown) => {
-    const task = t as Record<string, unknown>
-    return {
-      temporaryId: String(task.temporaryId || ''),
-      agentId: String(task.agentId || ''),
-      description: String(task.description || ''),
-      dependsOn: Array.isArray(task.dependsOn)
-        ? task.dependsOn.map((d) => String(d))
-        : [],
-      expectedOutput: String(task.expectedOutput || ''),
-    }
-  })
-
-  return {
-    objective: obj.objective as string,
-    tasks,
-    completionCriteria: obj.completionCriteria.map((c) => String(c)),
-  }
+  return parsed.data
 }
 
 /* ─────────────────────── plan validation ────────────────────── */

@@ -55,6 +55,8 @@ export type Agent = {
   maxRetryCount: number
   /** Workflow status */
   status?: 'draft' | 'active'
+  /** Monotonically increasing workflow snapshot version. */
+  workflowVersion?: number
   /** User-defined tags for categorisation */
   tags?: string[]
   createdAt: Date

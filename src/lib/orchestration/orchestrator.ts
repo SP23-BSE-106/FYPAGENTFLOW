@@ -21,6 +21,7 @@
 import { chatCompletion } from '@/lib/llm'
 import { getDb } from '@/lib/mongo/mongo'
 import { ObjectId } from 'mongodb'
+import { getExecutionBudget } from '@/lib/permissions'
 
 import { completeTask, createTask, failTask, updateTaskStatus } from './taskManager'
 import { createMessage } from './messageBus'
@@ -94,6 +95,12 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
   if (!graph || !graph.nodes || graph.nodes.length === 0) {
     throw new Error('Agent has no executable workflow graph')
   }
+  const budget = await getExecutionBudget(userId)
+  if (graph.nodes.length > budget.maxTasksPerRun) {
+    throw new Error(
+      `Workflow exceeds the maximum of ${budget.maxTasksPerRun} tasks per run`,
+    )
+  }
 
   // ── Find a critic / fact-checker agent for quality evaluation (Phase 9) ──
   const allAgents = await db
@@ -155,6 +162,9 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
       input,
       previousResults,
       sharedContext,
+      budget,
+      () =>
+        db.collection('agent_messages').countDocuments({ userId, workflowRunId: runId }),
     )
     tasksCompleted = result.completed
     tasksFailed = result.failed
@@ -175,6 +185,18 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
     // Sequential mode (Phase 6) with evaluation + recovery (Phase 9 + 10)
     // and human approval checkpoints (Phase 11).
     for (const nodeId of orderedIds) {
+      if (Date.now() - startedAt >= budget.maxRunDurationMs) {
+        finalOutput = { error: 'Execution duration budget exceeded' }
+        break
+      }
+      const currentMessageCount = await db.collection('agent_messages').countDocuments({
+        userId,
+        workflowRunId: runId,
+      })
+      if (currentMessageCount >= budget.maxMessagesPerRun) {
+        finalOutput = { error: 'Execution message budget exceeded' }
+        break
+      }
       const resolvedNode = resolved.find((r) => r.node.id === nodeId)
       if (!resolvedNode) continue
 
@@ -451,6 +473,11 @@ async function executeParallel(
   originalInput: string,
   previousResults: Record<string, unknown>,
   sharedContext: AgentExecutionContext['sharedContext'],
+  budget: {
+    maxRunDurationMs: number
+    maxMessagesPerRun: number
+  },
+  getMessageCount: () => Promise<number>,
 ): Promise<{
   completed: number
   failed: number
@@ -520,7 +547,12 @@ async function executeParallel(
   })
 
   // ── 5d. Run through bounded-concurrency scheduler ──────────────────
-  const schedule = await scheduleParallel(schedulableTasks, DEFAULT_SCHEDULER_CONFIG)
+  const schedule = await scheduleParallel(schedulableTasks, {
+    ...DEFAULT_SCHEDULER_CONFIG,
+    maxRunDurationMs: budget.maxRunDurationMs,
+    maxMessagesPerRun: budget.maxMessagesPerRun,
+    getMessageCount,
+  })
 
   // ── 5e. Collect results into previousResults ───────────────────────
   let messagesCreated = 0
