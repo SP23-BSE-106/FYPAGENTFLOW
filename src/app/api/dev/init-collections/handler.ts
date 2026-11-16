@@ -10,6 +10,13 @@ const COLLECTIONS = [
   'rag_chunks',
   'audit_events',
   'user_settings',
+  // Multi-agent upgrade collections (implementation plan Phase 2–4, 14).
+  'agent_tasks',
+  'agent_messages',
+  'shared_contexts',
+  'execution_events',
+  'agent_evaluations',
+  'approval_requests',
 ] as const
 
 /**

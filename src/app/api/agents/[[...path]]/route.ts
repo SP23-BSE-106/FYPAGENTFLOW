@@ -6,6 +6,7 @@ import * as generate from '../generate/handler'
 import * as root from '../handler'
 import * as runs from '../runs/handler'
 import * as byId from '../[id]/handler'
+import * as capabilities from '../capabilities/handler'
 
 // Workflow generation calls a model end to end. Without an explicit budget
 // Vercel applies its default, which is shorter than the request below — the
@@ -48,6 +49,12 @@ async function run(
   } else if (path.length === 1) {
     mod = byId
     handlerCtx = { params: Promise.resolve({ id: path[0] }) }
+  } else if (path.length === 2 && path[1] === 'capabilities') {
+    mod = capabilities
+    handlerCtx = { params: Promise.resolve({ id: path[0] }) }
+  } else if (path.length === 3 && path[1] === 'capabilities') {
+    mod = capabilities
+    handlerCtx = { params: Promise.resolve({ id: path[0], capabilityId: path[2] }) }
   } else {
     return notFound()
   }
