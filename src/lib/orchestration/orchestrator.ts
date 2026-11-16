@@ -40,6 +40,9 @@ import {
   isReviewExhausted,
   retryTaskWithFeedback,
 } from './evaluator'
+import {
+  createApprovalRequest,
+} from './approvalManager'
 import type {
   AgentExecutionContext,
   NodeExecutionResult,
@@ -169,10 +172,81 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
     messagesCreated = supervisorResult.messagesCreated
     finalOutput = supervisorResult.finalOutput
   } else {
-    // Sequential mode (Phase 6) with evaluation + recovery (Phase 9 + 10).
+    // Sequential mode (Phase 6) with evaluation + recovery (Phase 9 + 10)
+    // and human approval checkpoints (Phase 11).
     for (const nodeId of orderedIds) {
       const resolvedNode = resolved.find((r) => r.node.id === nodeId)
       if (!resolvedNode) continue
+
+      // ── Skip already-completed tasks (resume after approval pause) ──
+      const existingTask = await db
+        .collection('agent_tasks')
+        .find({ userId, workflowRunId: runId, title: resolvedNode.node.name })
+        .sort({ createdAt: -1 })
+        .limit(1)
+        .toArray()
+        .then((rows) => rows[0])
+
+      if (existingTask && existingTask.status === 'completed') {
+        previousResults[nodeId] = existingTask.output
+        continue
+      }
+
+      // ── Human approval checkpoint (Phase 11) ────────────────────────
+      if (resolvedNode.agent?.humanApprovalRequired) {
+        // If there's already a pending approval for this task, wait for it.
+        const pending = await db
+          .collection('approval_requests')
+          .findOne({
+            userId,
+            workflowRunId: runId,
+            taskId: existingTask?._id ?? '',
+            status: 'pending',
+          })
+
+        if (!pending && existingTask?._id) {
+          // Create the approval request and pause the run.
+          await createApprovalRequest({
+            userId,
+            workflowRunId: runId,
+            taskId: String(existingTask._id),
+            requestedByAgentId: resolvedNode.agent._id,
+            title: `Approve output from "${resolvedNode.node.name}"`,
+            description: resolvedNode.node.description || 'Human approval required before this agent output is used.',
+            payload: { nodeId, previousResults },
+          })
+
+          await db
+            .collection('workflow_runs')
+            .updateOne(
+              { _id: runResult.insertedId, userId },
+              { $set: { status: 'paused', updatedAt: new Date() } },
+            )
+
+          return {
+            runId,
+            status: 'paused',
+            output: finalOutput,
+            tasksCompleted,
+            tasksFailed,
+            messagesCreated,
+            durationMs: Date.now() - startedAt,
+          }
+        }
+
+        if (pending) {
+          // Run is paused waiting for this approval; stop here.
+          return {
+            runId,
+            status: 'paused',
+            output: finalOutput,
+            tasksCompleted,
+            tasksFailed,
+            messagesCreated,
+            durationMs: Date.now() - startedAt,
+          }
+        }
+      }
 
       // ── Execute the node (returns taskId for retry/recovery) ─────────
       const { taskId, result: nodeResult } = await executeTaskBodyWithId(

@@ -54,7 +54,7 @@ function isValidId(id: string): boolean {
 
 type PathParams = {
   runId?: string
-  section?: 'tasks' | 'messages' | 'evaluations' | 'approvals'
+  section?: 'tasks' | 'messages' | 'evaluations' | 'approvals' | 'events'
   id?: string // taskId or messageId
 }
 
@@ -561,6 +561,25 @@ async function listApprovals(_request: NextRequest, { runId }: PathParams) {
   return NextResponse.json(approvals)
 }
 
+/** GET /api/runs/:runId/events — live execution timeline (polling/SSE). */
+async function listEvents(_request: NextRequest, { runId }: PathParams) {
+  const userId = await getAuthenticatedUserId()
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  if (!runId || !isValidId(runId)) {
+    return NextResponse.json({ error: 'Invalid run ID' }, { status: 400 })
+  }
+
+  const db = await getDb()
+  const events = await db
+    .collection('execution_events')
+    .find({ userId, workflowRunId: runId })
+    .sort({ createdAt: 1 })
+    .toArray()
+
+  return NextResponse.json(events)
+}
+
 /* ──────────────────── dispatcher ───────────────────── */
 
 type RouteShape =
@@ -568,7 +587,6 @@ type RouteShape =
   | { kind: 'run'; runId: string }                   // /api/runs/:runId
   | { kind: 'section'; runId: string; section: PathParams['section'] } // /api/runs/:runId/:section
   | { kind: 'item'; runId: string; section: 'tasks' | 'messages'; id: string } // /api/runs/:runId/:section/:id
-
 function classify(
   path: string[],
 ): RouteShape | null {
@@ -579,7 +597,13 @@ function classify(
   if (!isValidId(runId)) return null
 
   if (path.length === 2) {
-    if (section === 'tasks' || section === 'messages' || section === 'evaluations' || section === 'approvals') {
+    if (
+      section === 'tasks' ||
+      section === 'messages' ||
+      section === 'evaluations' ||
+      section === 'approvals' ||
+      section === 'events'
+    ) {
       return { kind: 'section', runId, section }
     }
     return null
@@ -635,6 +659,10 @@ export async function handle(
       }
       if (section === 'approvals') {
         if (method === 'GET') return listApprovals(request, params)
+        return NextResponse.json({ error: 'Method not allowed' }, { status: 405 })
+      }
+      if (section === 'events') {
+        if (method === 'GET') return listEvents(request, params)
         return NextResponse.json({ error: 'Method not allowed' }, { status: 405 })
       }
       return NextResponse.json({ error: 'Not found' }, { status: 404 })
