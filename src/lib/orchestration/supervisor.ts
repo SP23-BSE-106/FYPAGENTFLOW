@@ -191,12 +191,7 @@ function parseSupervisorPlan(text: string): SupervisorPlan {
   const parsed = supervisorPlanSchema.safeParse(raw)
   if (!parsed.success) {
     throw new Error(
-      `Supervisor plan validation failed: ${parsed.error.issues
-        .map(
-          (issue: { path: (string | number)[]; message: string }) =>
-            `${issue.path.join('.')}: ${issue.message}`,
-        )
-        .join('; ')}`,
+      `Supervisor plan validation failed: ${parsed.error.issues.map((i) => i.message).join('; ')}`,
     )
   }
   return parsed.data
