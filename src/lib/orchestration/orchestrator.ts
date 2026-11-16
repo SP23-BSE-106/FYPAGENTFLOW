@@ -2,15 +2,17 @@
  * Multi-agent orchestrator engine (implementation plan Phase 5 + Phase 6).
  *
  * Responsible for executing a workflow graph as a set of cooperating agents.
- * The initial implementation supports sequential mode: nodes are executed in
- * topological order, each receiving the original input, previous results, the
- * shared run context, and relevant messages.
+ * Supports two modes:
+ *   - sequential: nodes execute one after another in topological order.
+ *   - parallel: independent branches run concurrently with bounded
+ *     concurrency; aggregator nodes wait for all their dependencies.
  *
  * Modules it composes:
  *   - taskManager         — task lifecycle (pending → running → completed/failed)
  *   - messageBus          — structured agent-to-agent messages
  *   - contextManager      — shared run context (intermediate results, decisions)
  *   - dependencyResolver  — topological order + cycle detection
+ *   - scheduler           — bounded-concurrency parallel execution
  */
 
 import { chatCompletion } from '@/lib/llm'
@@ -21,6 +23,7 @@ import { completeTask, createTask, failTask, updateTaskStatus } from './taskMana
 import { createMessage } from './messageBus'
 import { getSharedContext, updateSharedContext } from './contextManager'
 import { topologicalSort } from './dependencyResolver'
+import { scheduleParallel, type SchedulerConfig } from './scheduler'
 import type {
   AgentExecutionContext,
   NodeExecutionResult,
@@ -32,15 +35,25 @@ import type { Agent } from '@/lib/mongo/agent'
 import type { WorkflowGraph, WorkflowNode } from '@/lib/mongo/workflow'
 
 /**
+ * Default scheduler configuration for parallel runs.
+ */
+const DEFAULT_SCHEDULER_CONFIG: SchedulerConfig = {
+  maxConcurrentTasks: 5,
+  maxRunDurationMs: 300_000, // 5 minutes
+  maxMessagesPerRun: 500,
+}
+
+/**
  * Execute one workflow run.
  *
  * Steps:
  *   1. Load the agent and its workflow graph (validate ownership).
  *   2. Create a workflow run record.
- *   3. Resolve each node to its agent, topologically sort.
- *   4. For each node: create task → execute agent → write context → emit
- *      result message → complete/fail task.
- *   5. Return the orchestration result.
+ *   3. Resolve each node to its agent, topologically sort (cycle check).
+ *   4. Sequential mode: execute nodes one at a time in topological order.
+ *   5. Parallel mode: create all tasks up front, then run them through the
+ *      bounded-concurrency scheduler.
+ *   6. Return the orchestration result.
  */
 export async function orchestrate(request: OrchestrationRequest): Promise<OrchestrationResult> {
   const { agentId, input, userId, mode } = request
@@ -77,7 +90,7 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
   })
   const runId = String(runResult.insertedId)
 
-  // ── 3. Resolve nodes to agents and sort topologically ────────────────
+  // ── 3. Resolve nodes to agents and validate graph ────────────────────
   const resolved = resolveNodes(graph.nodes, agent)
   let orderedIds: string[]
   try {
@@ -93,41 +106,58 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
   const sharedContext = await getSharedContext(userId, runId)
   await updateSharedContext(userId, runId, { originalInput: input })
 
-  // ── 5. Execute nodes in order ────────────────────────────────────────
+  // ── 5. Execute nodes ────────────────────────────────────────────────
   const previousResults: Record<string, unknown> = {}
   let tasksCompleted = 0
   let tasksFailed = 0
   let messagesCreated = 0
   let finalOutput: unknown = null
 
-  for (const nodeId of orderedIds) {
-    const resolvedNode = resolved.find((r) => r.node.id === nodeId)
-    if (!resolvedNode) continue
-
-    const nodeResult = await executeNode(
+  if (mode === 'parallel') {
+    const result = await executeParallel(
       userId,
       runId,
-      resolvedNode,
+      resolved,
+      orderedIds,
+      graph.edges || [],
       input,
       previousResults,
       sharedContext,
     )
+    tasksCompleted = result.completed
+    tasksFailed = result.failed
+    messagesCreated = result.messagesCreated
+    finalOutput = result.finalOutput
+  } else {
+    // Sequential mode (Phase 6).
+    for (const nodeId of orderedIds) {
+      const resolvedNode = resolved.find((r) => r.node.id === nodeId)
+      if (!resolvedNode) continue
 
-    previousResults[nodeId] = nodeResult.output
-    messagesCreated += nodeResult.messages?.length ?? 0
+      const nodeResult = await executeTaskBody(
+        userId,
+        runId,
+        resolvedNode,
+        input,
+        previousResults,
+        sharedContext,
+      )
 
-    if (nodeResult.ok) {
-      tasksCompleted += 1
-      // Write the node's output into shared context so downstream agents see it.
-      await updateSharedContext(userId, runId, {
-        intermediateResults: { [nodeId]: nodeResult.output },
-      })
-      finalOutput = nodeResult.output
-    } else {
-      tasksFailed += 1
-      finalOutput = { error: nodeResult.error, failedNode: nodeId }
-      // A failed node stops the sequential chain (per Phase 6 acceptance).
-      break
+      previousResults[nodeId] = nodeResult.output
+      messagesCreated += nodeResult.messages?.length ?? 0
+
+      if (nodeResult.ok) {
+        tasksCompleted += 1
+        await updateSharedContext(userId, runId, {
+          intermediateResults: { [nodeId]: nodeResult.output },
+        })
+        finalOutput = nodeResult.output
+      } else {
+        tasksFailed += 1
+        finalOutput = { error: nodeResult.error, failedNode: nodeId }
+        // A failed node stops the sequential chain (per Phase 6 acceptance).
+        break
+      }
     }
   }
 
@@ -154,7 +184,7 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
     userId,
     workflowRunId: runId,
     type: status === 'completed' ? 'run.completed' : 'run.failed',
-    payload: { tasksCompleted, tasksFailed, messagesCreated, durationMs },
+    payload: { tasksCompleted, tasksFailed, messagesCreated, durationMs, mode },
     createdAt: new Date(),
   })
 
@@ -169,25 +199,127 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
   }
 }
 
-/** Map each workflow node to its agent (via config.agentId or the owner agent). */
-function resolveNodes(
-  nodes: Array<{ id: string; name: string; config?: Record<string, unknown> }>,
-  ownerAgent: Agent,
-): ResolvedNode[] {
-  return nodes.map((node) => ({
-    node: node as WorkflowNode,
-    agent: ownerAgent,
-  }))
+/**
+ * Execute all nodes in parallel with bounded concurrency.
+ *
+ * All tasks are created up front with their `dependsOnTaskIds` derived from
+ * the workflow edges. The scheduler then runs eligible tasks concurrently,
+ * respecting the concurrency limit and run-level timeout.
+ */
+async function executeParallel(
+  userId: string,
+  workflowRunId: string,
+  resolved: ResolvedNode[],
+  orderedIds: string[],
+  edges: Array<{ source: string; target: string; label?: string }>,
+  originalInput: string,
+  previousResults: Record<string, unknown>,
+  sharedContext: AgentExecutionContext['sharedContext'],
+): Promise<{
+  completed: number
+  failed: number
+  messagesCreated: number
+  finalOutput: unknown
+}> {
+  // ── 5a. Create all tasks up front (in topological order so dependencies
+  //      already exist when we wire dependsOnTaskIds) ──────────────────
+  const taskIdByNodeId = new Map<string, string>()
+
+  for (const nodeId of orderedIds) {
+    const resolvedNode = resolved.find((r) => r.node.id === nodeId)
+    if (!resolvedNode) continue
+
+    const { node, agent } = resolvedNode
+
+    // Gather the task IDs of this node's dependencies (incoming edges).
+    const dependsOnTaskIds: string[] = []
+    for (const edge of edges) {
+      if (edge.target === node.id) {
+        const depTaskId = taskIdByNodeId.get(edge.source)
+        if (depTaskId) dependsOnTaskIds.push(depTaskId)
+      }
+    }
+
+    const task = await createTask({
+      userId,
+      workflowRunId,
+      agentId: agent?._id ?? 'system',
+      title: node.name,
+      description: node.description || '',
+      input: {},
+      dependsOnTaskIds,
+      maxRetries: 3,
+    })
+
+    taskIdByNodeId.set(node.id, String(task._id))
+  }
+
+  // ── 5c. Build schedulable tasks ────────────────────────────────────
+  const schedulableTasks = resolved.map(({ node, agent }) => {
+    const taskId = taskIdByNodeId.get(node.id)!
+    // Collect the task IDs this node depends on (from incoming edges).
+    const dependsOnTaskIds: string[] = []
+    for (const edge of edges) {
+      if (edge.target === node.id) {
+        const depTaskId = taskIdByNodeId.get(edge.source)
+        if (depTaskId) dependsOnTaskIds.push(depTaskId)
+      }
+    }
+
+    return {
+      id: taskId,
+      dependsOnTaskIds,
+      execute: async () => {
+        return runNodeExecution(
+          taskId,
+          userId,
+          workflowRunId,
+          { node, agent },
+          originalInput,
+          previousResults,
+          sharedContext,
+        )
+      },
+    }
+  })
+
+  // ── 5d. Run through bounded-concurrency scheduler ──────────────────
+  const schedule = await scheduleParallel(schedulableTasks, DEFAULT_SCHEDULER_CONFIG)
+
+  // ── 5e. Collect results into previousResults ───────────────────────
+  let messagesCreated = 0
+  let finalOutput: unknown = null
+
+  for (const { node } of resolved) {
+    const taskId = taskIdByNodeId.get(node.id)!
+    const result = schedule.results.get(taskId)
+    if (!result) continue
+
+    messagesCreated += result.messages?.length ?? 0
+    previousResults[node.id] = result.output
+
+    if (result.ok) {
+      finalOutput = result.output
+    } else {
+      finalOutput = { error: result.error, failedNode: node.id }
+    }
+  }
+
+  return {
+    completed: schedule.completed,
+    failed: schedule.failed + schedule.cancelled.length,
+    messagesCreated,
+    finalOutput,
+  }
 }
 
 /**
- * Execute a single node as an agent turn.
+ * Create a task record for a node and execute it as an agent turn.
  *
- * Builds a prompt from original input, previous results, shared context and
- * relevant messages, then calls the inference provider with the agent's
- * system prompt.
+ * Used by sequential mode. Creates the task, then delegates to
+ * `runNodeExecution` for the actual agent turn.
  */
-async function executeNode(
+async function executeTaskBody(
   userId: string,
   workflowRunId: string,
   { node, agent }: ResolvedNode,
@@ -195,9 +327,6 @@ async function executeNode(
   previousResults: Record<string, unknown>,
   sharedContext: AgentExecutionContext['sharedContext'],
 ): Promise<NodeExecutionResult> {
-  const start = Date.now()
-
-  // Create the task record.
   const task = await createTask({
     userId,
     workflowRunId,
@@ -205,12 +334,43 @@ async function executeNode(
     title: node.name,
     description: node.description || '',
     input: previousResults,
+    dependsOnTaskIds: [],
+    maxRetries: 3,
   })
 
-  await updateTaskStatus(String(task._id), userId, workflowRunId, {
+  const taskId = String(task._id)
+  return runNodeExecution(
+    taskId,
+    userId,
+    workflowRunId,
+    { node, agent },
+    originalInput,
+    previousResults,
+    sharedContext,
+  )
+}
+
+/**
+ * Run a single node's agent turn against an already-created task.
+ *
+ * Sets task to running → builds prompt → calls LLM → writes shared
+ * context → emits result message → completes/fails task.
+ */
+async function runNodeExecution(
+  taskId: string,
+  userId: string,
+  workflowRunId: string,
+  { node, agent }: ResolvedNode,
+  originalInput: string,
+  previousResults: Record<string, unknown>,
+  sharedContext: AgentExecutionContext['sharedContext'],
+): Promise<NodeExecutionResult> {
+  await updateTaskStatus(taskId, userId, workflowRunId, {
     status: 'running',
     startedAt: true,
   })
+
+  const start = Date.now()
 
   try {
     const system = buildSystemPrompt(node, agent)
@@ -231,14 +391,14 @@ async function executeNode(
 
     if (!completion.ok) {
       const error = `No inference provider answered: ${completion.failures?.map((f) => f.message).join('; ') || 'unknown'}`
-      await failTask(String(task._id), userId, workflowRunId, error)
+      await failTask(taskId, userId, workflowRunId, error)
       await createMessage({
         userId,
         workflowId: workflowRunId,
         workflowRunId,
         fromAgentId: agent?._id ?? 'system',
         toAgentId: undefined,
-        taskId: String(task._id),
+        taskId,
         type: 'error',
         text: error,
         priority: 'high',
@@ -266,13 +426,13 @@ async function executeNode(
       workflowRunId,
       fromAgentId: agent?._id ?? 'system',
       toAgentId: undefined,
-      taskId: String(task._id),
+      taskId,
       type: 'result',
       text: output,
       payload: { nodeId: node.id, provider: completion.provider, model: completion.model },
     })
 
-    await completeTask(String(task._id), userId, workflowRunId, output)
+    await completeTask(taskId, userId, workflowRunId, output)
 
     return {
       nodeId: node.id,
@@ -285,7 +445,7 @@ async function executeNode(
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    await failTask(String(task._id), userId, workflowRunId, message)
+    await failTask(taskId, userId, workflowRunId, message)
     return {
       nodeId: node.id,
       ok: false,
@@ -295,6 +455,17 @@ async function executeNode(
       model: null,
     }
   }
+}
+
+/** Map each workflow node to its agent (via config.agentId or the owner agent). */
+function resolveNodes(
+  nodes: Array<{ id: string; name: string; config?: Record<string, unknown> }>,
+  ownerAgent: Agent,
+): ResolvedNode[] {
+  return nodes.map((node) => ({
+    node: node as WorkflowNode,
+    agent: ownerAgent,
+  }))
 }
 
 /** Build the system prompt from the agent config or node config. */
