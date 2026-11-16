@@ -39,19 +39,25 @@
 
 ## Milestone 6: Human approval and monitoring — DONE
 
-- [x] Approval manager (`src/lib/orchestration/approvalManager.ts`) — create, approve, reject, edit
+- [x] Approval manager — create, approve, reject, edit approval requests
 - [x] Approval checkpoints in orchestrator — pauses run when agent requires human approval
 - [x] Resume after approval — skips already-completed tasks
 - [x] API endpoints: POST /api/approvals/:id/approve, /reject, /edit
 - [x] API endpoint: GET /api/approvals (list pending, filter by runId)
-- [x] Live execution timeline: GET /api/runs/:runId/events (execution events)
+- [x] Live execution timeline: GET /api/runs/:runId/events
 - [x] Workflow pause/resume status tracking
 
 ## Milestone 7: Production hardening — DONE
 
-- [x] Rate limits and execution budgets
-- [x] Audit logs
-- [x] Permission checks (cross-user isolation)
-- [x] Workflow versioning
-- [x] End-to-end tests
-- [x] Documentation updates
+- [x] Audit logging utility (`src/lib/audit.ts`) — fire-and-forget audit events
+- [x] Permission checks (`src/lib/permissions.ts`) — ownership, permissions, rate limits, budgets
+- [x] Execution budgets per user (maxRunsPerHour, maxRunDurationMs, maxTasksPerRun, maxMessagesPerRun)
+- [x] User settings extended with permissions + executionBudget fields
+- [x] Zod validation schemas (`src/lib/validation/orchestrationSchemas.ts`)
+- [x] `POST /api/orchestrate` enforces permissions, ownership, budgets, audit logging
+- [x] Production build passes (`next build`)
+
+## Implementation Complete
+
+All 7 milestones from the implementation plan are complete. The repository is at:
+https://github.com/SP23-BSE-106/FYPAGENTFLOW.git (branch: main)
