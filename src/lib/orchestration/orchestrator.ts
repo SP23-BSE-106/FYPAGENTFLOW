@@ -33,6 +33,13 @@ import {
   listAvailableAgents,
   validateSupervisorPlan,
 } from './supervisor'
+import {
+  decideRecovery,
+  DEFAULT_RETRY_POLICY,
+  evaluateTaskOutput,
+  isReviewExhausted,
+  retryTaskWithFeedback,
+} from './evaluator'
 import type {
   AgentExecutionContext,
   NodeExecutionResult,
@@ -41,6 +48,7 @@ import type {
   ResolvedNode,
 } from './types'
 import type { Agent } from '@/lib/mongo/agent'
+import type { AgentTask } from '@/lib/mongo/agentTasks'
 import type { WorkflowGraph, WorkflowNode } from '@/lib/mongo/workflow'
 
 /**
@@ -83,6 +91,18 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
   if (!graph || !graph.nodes || graph.nodes.length === 0) {
     throw new Error('Agent has no executable workflow graph')
   }
+
+  // ── Find a critic / fact-checker agent for quality evaluation (Phase 9) ──
+  const allAgents = await db
+    .collection('agents')
+    .find({ userId }, { projection: { userApiKey: 0 } })
+    .toArray() as unknown as Agent[]
+  const criticAgent =
+    allAgents.find(
+      (a) =>
+        (a.role || '').toLowerCase() === 'critic' ||
+        (a.role || '').toLowerCase() === 'fact_checker',
+    ) || null
 
   // ── 2. Create the workflow run ───────────────────────────────────────
   const now = new Date()
@@ -149,12 +169,13 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
     messagesCreated = supervisorResult.messagesCreated
     finalOutput = supervisorResult.finalOutput
   } else {
-    // Sequential mode (Phase 6).
+    // Sequential mode (Phase 6) with evaluation + recovery (Phase 9 + 10).
     for (const nodeId of orderedIds) {
       const resolvedNode = resolved.find((r) => r.node.id === nodeId)
       if (!resolvedNode) continue
 
-      const nodeResult = await executeTaskBody(
+      // ── Execute the node (returns taskId for retry/recovery) ─────────
+      const { taskId, result: nodeResult } = await executeTaskBodyWithId(
         userId,
         runId,
         resolvedNode,
@@ -167,16 +188,137 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
       messagesCreated += nodeResult.messages?.length ?? 0
 
       if (nodeResult.ok) {
+        // ── Critic evaluation (Phase 9) ─────────────────────────────
+        if (criticAgent && nodeResult.output) {
+          const reviewCycle = 0
+          const evaluation = await evaluateTaskOutput(
+            userId,
+            runId,
+            taskId,
+            criticAgent,
+            nodeResult.output,
+            input,
+            reviewCycle,
+          )
+          messagesCreated += 1
+
+          if (!evaluation.passed && !isReviewExhausted(reviewCycle)) {
+            // Revise based on critic feedback (max review cycles enforced).
+            const revision = await retryTaskWithFeedback(
+              taskId,
+              userId,
+              runId,
+              resolvedNode.agent,
+              evaluation.feedback,
+              input,
+              previousResults,
+            )
+
+            if (revision.ok) {
+              previousResults[nodeId] = revision.output
+              messagesCreated += 1
+              await updateSharedContext(userId, runId, {
+                intermediateResults: { [nodeId]: revision.output },
+              })
+              finalOutput = revision.output
+              tasksCompleted += 1
+              continue
+            } else {
+              // Revision failed — fall through to failure handling.
+              tasksFailed += 1
+              finalOutput = {
+                error: revision.error,
+                failedNode: nodeId,
+                evaluation: { passed: false, scores: evaluation.scores },
+              }
+              break
+            }
+          } else if (!evaluation.passed) {
+            // Review cycles exhausted.
+            tasksFailed += 1
+            finalOutput = {
+              error: 'Review cycles exhausted',
+              failedNode: nodeId,
+              evaluation: { passed: false, scores: evaluation.scores },
+            }
+            break
+          }
+        }
+
         tasksCompleted += 1
         await updateSharedContext(userId, runId, {
           intermediateResults: { [nodeId]: nodeResult.output },
         })
         finalOutput = nodeResult.output
       } else {
-        tasksFailed += 1
-        finalOutput = { error: nodeResult.error, failedNode: nodeId }
-        // A failed node stops the sequential chain (per Phase 6 acceptance).
-        break
+        // ── Failure recovery (Phase 10) ─────────────────────────────
+        const taskForRecovery: AgentTask = {
+          _id: taskId,
+          userId,
+          workflowRunId: runId,
+          agentId: resolvedNode.agent?._id ?? 'system',
+          title: resolvedNode.node.name,
+          description: resolvedNode.node.description || '',
+          input: previousResults,
+          status: 'failed',
+          dependsOnTaskIds: [],
+          retryCount: 0,
+          maxRetries: resolvedNode.agent?.maxRetryCount ?? 3,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          error: nodeResult.error,
+        }
+
+        const recovery = decideRecovery(
+          taskForRecovery,
+          nodeResult.error ?? 'Unknown error',
+          DEFAULT_RETRY_POLICY,
+        )
+
+        if (recovery.action === 'retry' || recovery.action === 'fallback') {
+          // Retry the same task (or fallback agent/model).
+          const fallbackAgent =
+            recovery.action === 'fallback' && recovery.fallbackAgentId
+              ? allAgents.find((a) => String(a._id) === recovery.fallbackAgentId) ??
+                resolvedNode.agent
+              : resolvedNode.agent
+
+          const retryResult = await retryTaskWithFeedback(
+            taskId,
+            userId,
+            runId,
+            fallbackAgent,
+            [nodeResult.error ?? 'Unknown error'],
+            input,
+            previousResults,
+          )
+
+          if (retryResult.ok) {
+            previousResults[nodeId] = retryResult.output
+            messagesCreated += 1
+            await updateSharedContext(userId, runId, {
+              intermediateResults: { [nodeId]: retryResult.output },
+            })
+            finalOutput = retryResult.output
+            tasksCompleted += 1
+            continue
+          } else {
+            tasksFailed += 1
+            finalOutput = {
+              error: retryResult.error,
+              failedNode: nodeId,
+            }
+            break
+          }
+        } else {
+          tasksFailed += 1
+          finalOutput = {
+            error: recovery.reason ?? nodeResult.error,
+            failedNode: nodeId,
+          }
+          // A failed node stops the sequential chain (per Phase 6 acceptance).
+          break
+        }
       }
     }
   }
@@ -392,14 +534,20 @@ async function executeSupervisorMode(
  * Used by sequential mode. Creates the task, then delegates to
  * `runNodeExecution` for the actual agent turn.
  */
-async function executeTaskBody(
+/**
+ * Create a task record for a node and execute it as an agent turn.
+ *
+ * Returns both the task id (for retry/recovery) and the execution result.
+ * Used by sequential mode.
+ */
+async function executeTaskBodyWithId(
   userId: string,
   workflowRunId: string,
   { node, agent }: ResolvedNode,
   originalInput: string,
   previousResults: Record<string, unknown>,
   sharedContext: AgentExecutionContext['sharedContext'],
-): Promise<NodeExecutionResult> {
+): Promise<{ taskId: string; result: NodeExecutionResult }> {
   const task = await createTask({
     userId,
     workflowRunId,
@@ -408,11 +556,11 @@ async function executeTaskBody(
     description: node.description || '',
     input: previousResults,
     dependsOnTaskIds: [],
-    maxRetries: 3,
+    maxRetries: agent?.maxRetryCount ?? 3,
   })
 
   const taskId = String(task._id)
-  return runNodeExecution(
+  const result = await runNodeExecution(
     taskId,
     userId,
     workflowRunId,
@@ -421,6 +569,8 @@ async function executeTaskBody(
     previousResults,
     sharedContext,
   )
+
+  return { taskId, result }
 }
 
 /**

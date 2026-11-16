@@ -38,16 +38,25 @@
 - [x] Plan execution (`executeSupervisorPlan`) — creates tasks, wires deps, runs via scheduler
 - [x] Supervisor mode integrated into orchestrator (`mode: 'supervisor'`)
 - [x] API endpoint `POST /api/supervisor/plan` — generate + validate plan without executing (preview/approval)
+
+## Milestone 5: Evaluation and recovery — DONE
+
+- [x] Evaluator (`src/lib/orchestration/evaluator.ts`) — critic/fact-checker evaluation (accuracy, relevance, completeness, groundedness)
+- [x] Critic agent discovery — finds agent with role 'critic' or 'fact_checker'
+- [x] Evaluation integrated into sequential mode — after each task, critic scores output; if below 0.7 threshold, triggers revision
+- [x] Max review cycles (3) — prevents infinite debate loops
+- [x] Retry/fallback (`decideRecovery`, `retryTaskWithFeedback`) — retry same agent, fallback agent/model, or stop
+- [x] Retry policy — maxRetries, backoffMs, retryableErrors, fallbackAgentId, fallbackModel
+- [x] Feedback messages emitted for each retry/revision
 - [x] `tsc --noEmit` passes; eslint clean on new files
 
-## Milestone 5: Evaluation and recovery — NEXT
+## Milestone 6: Human approval and monitoring — NEXT
 
-- [ ] Critic agent — evaluates output quality (accuracy, relevance, completeness, groundedness)
-- [ ] Fact-checker agent — verifies claims using RAG
-- [ ] Retry and fallback handling
-- [ ] Maximum review cycles
-- [ ] Failure states
+- [ ] Approval requests (pause/resume workflows)
+- [ ] Live execution timeline (GET /api/runs/:runId/events)
+- [ ] Approve/reject/edit endpoints
+- [ ] Run analytics
 
 ## Later milestones
 
-- Human approval checkpoints, live execution monitor, production hardening
+- Production hardening (rate limits, audit logs, permission checks)
