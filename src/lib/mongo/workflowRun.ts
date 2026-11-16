@@ -14,7 +14,7 @@ export type WorkflowRun = {
   /** Optional output payload (or summary) */
   output?: Record<string, unknown>
 
-  status: 'queued' | 'running' | 'success' | 'failed'
+  status: 'queued' | 'running' | 'success' | 'failed' | 'cancelled' | 'paused'
   error?: {
     name?: string
     message?: string
@@ -30,4 +30,3 @@ export type WorkflowRun = {
 
   createdAt: Date
 }
-

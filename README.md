@@ -78,6 +78,31 @@ Everything described in this README corresponds to code that exists in this repo
 * The handler runs retrieval, builds a grounded prompt, and calls inference through `src/lib/llm.ts`.
 * `maxDuration = 60` is declared so a cold provider is not cut off by the platform first.
 
+### 🛡️ 9. Multi-agent production hardening
+
+* Workflow execution is rate-limited per user and checks workspace execution permissions.
+* Configured task, message, and duration budgets are enforced for sequential and parallel runs.
+* Agent ownership is checked before execution and all agent/workflow lifecycle events are audited.
+* Agent workflow snapshots are versioned and available through `GET /api/agents/{id}/versions`.
+* Supervisor plans and orchestration requests are validated with Zod before execution.
+
+#### Validation and E2E checks
+
+```powershell
+npm run test:workflow
+npm run test:hardening
+```
+
+The API E2E smoke test is opt-in because it requires a running deployment and
+an authenticated test account:
+
+```powershell
+$env:AGENTFLOW_E2E_URL = "http://localhost:3000"
+$env:AGENTFLOW_E2E_COOKIE = "session=..."
+$env:AGENTFLOW_E2E_AGENT_ID = "..."
+npm run test:e2e
+```
+
 ---
 
 ## 🛠️ Technology Stack
@@ -261,4 +286,3 @@ This project was developed as a **Final Year Project (FYP)** for academic evalua
 <p align="center">
   Crafted with ❤️ using <strong>Next.js 16</strong>, <strong>React Flow</strong> and <strong>TypeScript</strong>.
 </p>
-

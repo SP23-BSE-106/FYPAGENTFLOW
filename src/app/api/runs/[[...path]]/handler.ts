@@ -164,8 +164,14 @@ async function actionRun(request: NextRequest, { runId }: PathParams) {
     return NextResponse.json({ error: 'Run not found' }, { status: 404 })
   }
 
+  if (action === 'cancel' && !['queued', 'running', 'paused'].includes(run.status)) {
+    return NextResponse.json(
+      { error: `Cannot cancel a run in '${run.status}' state` },
+      { status: 409 },
+    )
+  }
   const newStatus =
-    action === 'cancel' ? 'failed' : run.status === 'failed' ? 'queued' : run.status
+    action === 'cancel' ? 'cancelled' : run.status === 'failed' ? 'queued' : run.status
 
   await db
     .collection('workflow_runs')

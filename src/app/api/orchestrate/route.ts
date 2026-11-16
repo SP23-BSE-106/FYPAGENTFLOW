@@ -1,6 +1,5 @@
 import type { NextRequest } from 'next/server'
 
-import { getDb } from '@/lib/mongo/mongo'
 import { getSessionTokenFromCookies, verifyJwt } from '@/lib/auth/jwt'
 import { authorizeExecution, checkOwnership } from '@/lib/permissions'
 import { auditWorkflowExecute } from '@/lib/audit'
@@ -59,8 +58,6 @@ export async function POST(request: NextRequest) {
   }
   const { agentId, input, mode } = parsed.data
 
-  const db = await getDb()
-
   // ── Permission check ───────────────────────────────────────────────
   const permission = await authorizeExecution(userId, 'canExecute')
   if (!permission.allowed) {
@@ -71,7 +68,7 @@ export async function POST(request: NextRequest) {
   }
 
   // ── Ownership: agent must belong to the caller ─────────────────────
-  const owned = await checkOwnership(db, 'agents', agentId, userId)
+  const owned = await checkOwnership('agents', agentId, userId)
   if (!owned.allowed) {
     return new Response(JSON.stringify({ error: owned.reason }), {
       status: owned.status ?? 404,
@@ -81,7 +78,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const startedAt = Date.now()
-    const result = await orchestrate({ agentId, input, userId, mode })
+    const result = await orchestrate({ agentId, input, userId, mode: mode ?? 'sequential' })
     const durationMs = Date.now() - startedAt
 
     // ── Audit log ────────────────────────────────────────────────────

@@ -47,11 +47,11 @@
 - [x] Live execution timeline: GET /api/runs/:runId/events (execution events)
 - [x] Workflow pause/resume status tracking
 
-## Milestone 7: Production hardening — IN PROGRESS
+## Milestone 7: Production hardening — DONE
 
 - [x] Rate limits and execution budgets
 - [x] Audit logs
 - [x] Permission checks (cross-user isolation)
 - [x] Workflow versioning
-- [ ] End-to-end tests
-- [ ] Documentation updates
+- [x] End-to-end tests
+- [x] Documentation updates

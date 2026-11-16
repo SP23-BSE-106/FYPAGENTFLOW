@@ -18,6 +18,7 @@ export type SchedulerConfig = {
   maxRunDurationMs: number
   maxMessagesPerRun: number
   getMessageCount?: () => Promise<number>
+  isCancelled?: () => Promise<boolean>
 }
 
 export type SchedulableTask = {
@@ -71,6 +72,11 @@ export async function scheduleParallel(
   }
 
   while (remaining.size > 0 || active.size > 0) {
+    if (config.isCancelled && (await config.isCancelled())) {
+      for (const id of remaining) cancelled.add(id)
+      remaining.clear()
+      break
+    }
     // ── Run-level timeout ────────────────────────────────────────────
     if (Date.now() - startTime > config.maxRunDurationMs) {
       for (const id of remaining) cancelled.add(id)

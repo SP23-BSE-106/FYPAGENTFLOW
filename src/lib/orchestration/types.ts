@@ -24,7 +24,7 @@ export type OrchestrationRequest = {
 
 export type OrchestrationResult = {
   runId: string
-  status: 'completed' | 'failed' | 'paused'
+  status: 'completed' | 'failed' | 'paused' | 'cancelled'
   output?: unknown
   tasksCompleted: number
   tasksFailed: number

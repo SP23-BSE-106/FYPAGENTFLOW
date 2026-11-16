@@ -52,12 +52,12 @@ export async function auditWorkflowExecute(input: {
     resourceType: 'workflow',
     resourceId: input.workflowId,
     metadata: {
-      runId: input.runId ?? null,
-      mode: input.mode ?? null,
-      status: input.status ?? null,
-      durationMs: input.durationMs ?? null,
-      agentId: input.agentId ?? null,
-    },
+      runId: input.runId ?? undefined,
+      mode: input.mode ?? undefined,
+      status: input.status ?? undefined,
+      durationMs: input.durationMs ?? undefined,
+      agentId: input.agentId ?? undefined,
+    } as Record<string, unknown>,
   })
 }
 

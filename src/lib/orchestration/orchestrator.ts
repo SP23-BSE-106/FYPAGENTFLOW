@@ -144,6 +144,14 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
   // ── 4. Shared context for this run ──────────────────────────────────
   const sharedContext = await getSharedContext(userId, runId)
   await updateSharedContext(userId, runId, { originalInput: input })
+  const isCancelled = async () =>
+    Boolean(
+      await db.collection('workflow_runs').findOne({
+        _id: runResult.insertedId,
+        userId,
+        status: 'cancelled',
+      }),
+    )
 
   // ── 5. Execute nodes ────────────────────────────────────────────────
   const previousResults: Record<string, unknown> = {}
@@ -165,6 +173,7 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
       budget,
       () =>
         db.collection('agent_messages').countDocuments({ userId, workflowRunId: runId }),
+      isCancelled,
     )
     tasksCompleted = result.completed
     tasksFailed = result.failed
@@ -185,6 +194,10 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
     // Sequential mode (Phase 6) with evaluation + recovery (Phase 9 + 10)
     // and human approval checkpoints (Phase 11).
     for (const nodeId of orderedIds) {
+      if (await isCancelled()) {
+        finalOutput = { error: 'Workflow cancelled' }
+        break
+      }
       if (Date.now() - startedAt >= budget.maxRunDurationMs) {
         finalOutput = { error: 'Execution duration budget exceeded' }
         break
@@ -421,7 +434,13 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
 
   // ── 6. Finalise the run ─────────────────────────────────────────────
   const status =
-    tasksFailed > 0 ? 'failed' : tasksCompleted === orderedIds.length ? 'completed' : 'failed'
+    (await isCancelled())
+      ? 'cancelled'
+      : tasksFailed > 0
+        ? 'failed'
+        : tasksCompleted === orderedIds.length
+          ? 'completed'
+          : 'failed'
   const durationMs = Date.now() - startedAt
 
   await db
@@ -478,6 +497,7 @@ async function executeParallel(
     maxMessagesPerRun: number
   },
   getMessageCount: () => Promise<number>,
+  isCancelled: () => Promise<boolean>,
 ): Promise<{
   completed: number
   failed: number
@@ -552,6 +572,7 @@ async function executeParallel(
     maxRunDurationMs: budget.maxRunDurationMs,
     maxMessagesPerRun: budget.maxMessagesPerRun,
     getMessageCount,
+    isCancelled,
   })
 
   // ── 5e. Collect results into previousResults ───────────────────────

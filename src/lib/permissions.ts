@@ -63,11 +63,11 @@ export async function getExecutionBudget(
  * @param userId - calling user's id
  */
 export async function checkOwnership(
-  db: Awaited<ReturnType<typeof getDb>>,
   collection: string,
   resourceId: string,
   userId: string,
 ): Promise<PermissionResult> {
+  const db = await getDb()
   const ids: (string | ObjectId)[] = [resourceId]
   if (ObjectId.isValid(resourceId)) ids.push(new ObjectId(resourceId))
   const resource = await db
@@ -107,7 +107,10 @@ export async function checkPermission(
 /**
  * Check rate limits for a scoped key (e.g. `execute:userId`).
  */
-export function checkRateLimit(key: string, opts: { windowMs: number; max: number }) {
+export function checkRateLimit(
+  key: string,
+  opts: { windowMs: number; max: number },
+): { ok: boolean; remaining: number; retryAfterMs?: number } {
   return rateLimit(key, opts)
 }
 
