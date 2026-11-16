@@ -2,10 +2,12 @@
  * Multi-agent orchestrator engine (implementation plan Phase 5 + Phase 6).
  *
  * Responsible for executing a workflow graph as a set of cooperating agents.
- * Supports two modes:
+ * Supports three modes:
  *   - sequential: nodes execute one after another in topological order.
  *   - parallel: independent branches run concurrently with bounded
  *     concurrency; aggregator nodes wait for all their dependencies.
+ *   - supervisor: a supervisor agent generates a structured execution plan
+ *     from a natural-language request, then executes it.
  *
  * Modules it composes:
  *   - taskManager         — task lifecycle (pending → running → completed/failed)
@@ -13,6 +15,7 @@
  *   - contextManager      — shared run context (intermediate results, decisions)
  *   - dependencyResolver  — topological order + cycle detection
  *   - scheduler           — bounded-concurrency parallel execution
+ *   - supervisor          — plan generation, validation, execution
  */
 
 import { chatCompletion } from '@/lib/llm'
@@ -24,6 +27,12 @@ import { createMessage } from './messageBus'
 import { getSharedContext, updateSharedContext } from './contextManager'
 import { topologicalSort } from './dependencyResolver'
 import { scheduleParallel, type SchedulerConfig } from './scheduler'
+import {
+  executeSupervisorPlan,
+  generateSupervisorPlan,
+  listAvailableAgents,
+  validateSupervisorPlan,
+} from './supervisor'
 import type {
   AgentExecutionContext,
   NodeExecutionResult,
@@ -128,6 +137,17 @@ export async function orchestrate(request: OrchestrationRequest): Promise<Orches
     tasksFailed = result.failed
     messagesCreated = result.messagesCreated
     finalOutput = result.finalOutput
+  } else if (mode === 'supervisor') {
+    const supervisorResult = await executeSupervisorMode(
+      userId,
+      runId,
+      agent,
+      input,
+    )
+    tasksCompleted = supervisorResult.completed
+    tasksFailed = supervisorResult.failed
+    messagesCreated = supervisorResult.messagesCreated
+    finalOutput = supervisorResult.finalOutput
   } else {
     // Sequential mode (Phase 6).
     for (const nodeId of orderedIds) {
@@ -311,6 +331,59 @@ async function executeParallel(
     messagesCreated,
     finalOutput,
   }
+}
+
+/**
+ * Supervisor mode: generate a plan from the natural-language request,
+ * validate it, then execute the tasks via the bounded-concurrency scheduler.
+ */
+async function executeSupervisorMode(
+  userId: string,
+  workflowRunId: string,
+  agent: Agent,
+  input: string,
+): Promise<{
+  completed: number
+  failed: number
+  messagesCreated: number
+  finalOutput: unknown
+}> {
+  // ── List available agents for plan selection ───────────────────────
+  const agentSummaries = await listAvailableAgents(userId)
+
+  // ── Generate the plan ──────────────────────────────────────────────
+  const plan = await generateSupervisorPlan(userId, input, agentSummaries)
+
+  // ── Validate the plan ──────────────────────────────────────────────
+  const validation = validateSupervisorPlan(plan, agentSummaries)
+  if (!validation.valid) {
+    throw new Error(`Supervisor plan invalid: ${validation.errors.join('; ')}`)
+  }
+
+  // ── Load full agent documents (needed for execution) ───────────────
+  const db = await getDb()
+  const agents = await db
+    .collection('agents')
+    .find({ userId }, { projection: { userApiKey: 0 } })
+    .toArray() as unknown as Agent[]
+
+  // ── Execute the plan ───────────────────────────────────────────────
+  const result = await executeSupervisorPlan(
+    userId,
+    workflowRunId,
+    plan,
+    agents,
+  )
+
+  // ── Persist the plan and objective to shared context ───────────────
+  await updateSharedContext(userId, workflowRunId, {
+    variables: {
+      supervisorObjective: plan.objective,
+      supervisorCompletionCriteria: plan.completionCriteria,
+    },
+  })
+
+  return result
 }
 
 /**

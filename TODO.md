@@ -29,13 +29,25 @@
 - [x] `POST /api/orchestrate` supports `mode: 'parallel'`
 - [x] `tsc --noEmit` passes; eslint clean on new files
 
-## Milestone 4: Supervisor orchestration — NEXT
+## Milestone 4: Supervisor orchestration — DONE
 
-- [ ] Supervisor agent that generates structured execution plans from natural language
-- [ ] Plan validation (cycle detection, capability matching, permission checks)
-- [ ] Dynamic delegation / reassignment
+- [x] Supervisor plan types (`src/lib/orchestration/supervisor.ts`) — SupervisorPlan, SupervisorPlanTask, PlanValidation
+- [x] Agent discovery (`listAvailableAgents`) — lists caller's agents with capabilities
+- [x] Plan generation (`generateSupervisorPlan`) — LLM breaks request into structured plan
+- [x] Plan validation (`validateSupervisorPlan`) — agent IDs, deps, cycles, task limits
+- [x] Plan execution (`executeSupervisorPlan`) — creates tasks, wires deps, runs via scheduler
+- [x] Supervisor mode integrated into orchestrator (`mode: 'supervisor'`)
+- [x] API endpoint `POST /api/supervisor/plan` — generate + validate plan without executing (preview/approval)
+- [x] `tsc --noEmit` passes; eslint clean on new files
+
+## Milestone 5: Evaluation and recovery — NEXT
+
+- [ ] Critic agent — evaluates output quality (accuracy, relevance, completeness, groundedness)
+- [ ] Fact-checker agent — verifies claims using RAG
+- [ ] Retry and fallback handling
+- [ ] Maximum review cycles
+- [ ] Failure states
 
 ## Later milestones
 
-- Critic/fact-checker agents, retries/fallback, human approval,
-  live execution monitor, production hardening
+- Human approval checkpoints, live execution monitor, production hardening
